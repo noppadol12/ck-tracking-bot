@@ -6,38 +6,36 @@
 const { trackWithTrackingMore } = require('../lib/tracking');
 const { generateTrackingImage }  = require('../lib/imageGen');
 
-// ── In-memory state (Vercel serverless ใช้ได้สำหรับ low-traffic)
-// ถ้าต้องการ persistent ให้เปลี่ยนเป็น Redis หรือ KV Store
+// In-memory state
 const userState = {};
 
 // ──────────────────────────────────────────────
-//  🚀 Vercel Serverless Function Entry Point
+//  🚀 Entry Point
 // ──────────────────────────────────────────────
 module.exports = async (req, res) => {
-  // LINE Verify ส่ง GET มาตรวจสอบ
   if (req.method === 'GET') {
     return res.status(200).json({ status: 'ok' });
   }
-
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' });
   }
 
-  // ตอบ 200 ทันที ก่อน process (LINE timeout 30s)
-  res.status(200).json({ status: 'ok' });
-
   try {
     const events = req.body?.events || [];
-    for (const event of events) {
+    // Process ทุก event ก่อน แล้วค่อยตอบ 200
+    await Promise.all(events.map(event => {
       if (event.type === 'message' && event.message?.type === 'text') {
-        await handleTextMessage(event);
+        return handleTextMessage(event);
       } else if (event.type === 'postback') {
-        await handlePostback(event);
+        return handlePostback(event);
       }
-    }
+    }));
   } catch (err) {
     console.error('Webhook error:', err.message);
   }
+
+  // ตอบ 200 หลัง process เสร็จ
+  return res.status(200).json({ status: 'ok' });
 };
 
 // ──────────────────────────────────────────────
@@ -49,25 +47,22 @@ async function handleTextMessage(event) {
   const text       = (event.message.text || '').trim();
   const state      = userState[userId] || 'IDLE';
 
-  // Reset
   if (['เริ่มใหม่', 'เมนู', 'menu', 'start'].includes(text.toLowerCase())) {
     delete userState[userId];
     return sendQuickReplyCourier(replyToken);
   }
 
-  // รอเลขพัสดุ
   if (state.startsWith('WAIT_TRACKING_')) {
     const carrier = state.replace('WAIT_TRACKING_', '');
     delete userState[userId];
     return processTracking(replyToken, userId, carrier, text);
   }
 
-  // Default
   return sendQuickReplyCourier(replyToken);
 }
 
 // ──────────────────────────────────────────────
-//  🔘 Handle Postback (Quick Reply button)
+//  🔘 Handle Postback
 // ──────────────────────────────────────────────
 async function handlePostback(event) {
   const userId     = event.source.userId;
@@ -91,19 +86,15 @@ async function sendQuickReplyCourier(replyToken) {
         {
           type: 'action',
           action: {
-            type:        'postback',
-            label:       '📮 EMS',
-            data:        'carrier=EMS',
-            displayText: 'EMS (ไปรษณีย์ไทย)',
+            type: 'postback', label: '📮 EMS',
+            data: 'carrier=EMS', displayText: 'EMS (ไปรษณีย์ไทย)',
           },
         },
         {
           type: 'action',
           action: {
-            type:        'postback',
-            label:       '⚡ Flash',
-            data:        'carrier=FLASH',
-            displayText: 'Flash Express',
+            type: 'postback', label: '⚡ Flash',
+            data: 'carrier=FLASH', displayText: 'Flash Express',
           },
         },
       ],
@@ -123,21 +114,15 @@ async function askTrackingNumber(replyToken, carrier) {
 }
 
 // ──────────────────────────────────────────────
-//  🔍 ตรวจสอบพัสดุ → สร้างรูป → ส่ง
+//  🔍 ตรวจสอบพัสดุ → รูป → ส่ง
 // ──────────────────────────────────────────────
 async function processTracking(replyToken, userId, carrier, trackingNumber) {
-  // แจ้งว่ากำลังตรวจสอบ
-  await replyToLine(replyToken, [{
-    type: 'text',
-    text: '🔍 กำลังตรวจสอบพัสดุ กรุณารอสักครู่ค่ะ...',
-  }]);
-
   let data;
   try {
     data = await trackWithTrackingMore(trackingNumber, carrier);
   } catch (err) {
     console.error('Tracking error:', err.message);
-    return pushToLine(userId, [{
+    return replyToLine(replyToken, [{
       type: 'text',
       text: `❌ ไม่สามารถตรวจสอบพัสดุได้ค่ะ\n(${err.message})\n\nกรุณาลองใหม่ หรือพิมพ์ "เริ่มใหม่"`,
     }]);
@@ -148,11 +133,10 @@ async function processTracking(replyToken, userId, carrier, trackingNumber) {
     imageUrl = await generateTrackingImage(carrier, trackingNumber, data);
   } catch (err) {
     console.error('Image error:', err.message);
-    // Fallback เป็น text message
-    return pushToLine(userId, [buildTextFallback(carrier, trackingNumber, data)]);
+    return replyToLine(replyToken, [buildTextFallback(carrier, trackingNumber, data)]);
   }
 
-  return pushToLine(userId, [
+  return replyToLine(replyToken, [
     {
       type: 'image',
       originalContentUrl: imageUrl,
@@ -172,34 +156,24 @@ async function processTracking(replyToken, userId, carrier, trackingNumber) {
 }
 
 // ──────────────────────────────────────────────
-//  📡 LINE API — Reply & Push
+//  📡 LINE Reply API
 // ──────────────────────────────────────────────
 async function replyToLine(replyToken, messages) {
   const res = await fetch('https://api.line.me/v2/bot/message/reply', {
     method:  'POST',
     headers: {
-      'Content-Type':  'application/json',
-      Authorization:   'Bearer ' + process.env.LINE_CHANNEL_ACCESS_TOKEN,
+      'Content-Type': 'application/json',
+      Authorization:  'Bearer ' + process.env.LINE_CHANNEL_ACCESS_TOKEN,
     },
     body: JSON.stringify({ replyToken, messages }),
   });
-  if (!res.ok) console.error('LINE reply error:', await res.text());
-}
-
-async function pushToLine(userId, messages) {
-  const res = await fetch('https://api.line.me/v2/bot/message/push', {
-    method:  'POST',
-    headers: {
-      'Content-Type':  'application/json',
-      Authorization:   'Bearer ' + process.env.LINE_CHANNEL_ACCESS_TOKEN,
-    },
-    body: JSON.stringify({ to: userId, messages }),
-  });
-  if (!res.ok) console.error('LINE push error:', await res.text());
+  const text = await res.text();
+  if (!res.ok) console.error('LINE reply error:', text);
+  else console.log('LINE reply ok');
 }
 
 // ──────────────────────────────────────────────
-//  🛠️ Text Fallback (กรณีสร้างรูปไม่ได้)
+//  🛠️ Text Fallback
 // ──────────────────────────────────────────────
 function buildTextFallback(carrier, trackingNumber, data) {
   return {
