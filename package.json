@@ -1,0 +1,12 @@
+{
+  "name": "ck-tracking-bot",
+  "version": "1.0.0",
+  "description": "LINE Bot ติดตามพัสดุ — ร้าน ซี.เค.แอร์คอนด์",
+  "main": "api/webhook.js",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "dev": "vercel dev"
+  }
+}
