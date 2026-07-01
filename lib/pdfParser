@@ -11,7 +11,10 @@ const pdfParse = require('pdf-parse');
 async function parseBillPDF(buffer) {
   const data = await pdfParse(buffer);
   const text = data.text;
-  console.log('PDF text:', text.slice(0, 500));
+  // Log ทั้งหมดเพื่อ debug (ดูใน Vercel → Functions → Logs)
+  console.log('===PDF FULL TEXT START===');
+  console.log(text);
+  console.log('===PDF FULL TEXT END===');
 
   const date    = extractDate(text);
   const parcels = extractParcels(text);
