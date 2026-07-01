@@ -1,0 +1,123 @@
+// ============================================================
+//  lib/pdfParser.js — อ่าน PDF บิลค่าส่ง แล้วดึงข้อมูลพัสดุ
+//  รองรับ: Flash Express, EMS (ไปรษณีย์ไทย)
+// ============================================================
+
+const pdfParse = require('pdf-parse');
+
+// ──────────────────────────────────────────────
+//  🔍 Main: รับ Buffer → คืน { date, parcels[] }
+// ──────────────────────────────────────────────
+async function parseBillPDF(buffer) {
+  const data = await pdfParse(buffer);
+  const text = data.text;
+  console.log('PDF text:', text.slice(0, 500));
+
+  const date    = extractDate(text);
+  const parcels = extractParcels(text);
+  return { date, parcels };
+}
+
+// ──────────────────────────────────────────────
+//  📅 ดึงวันที่จากหัวบิล
+// ──────────────────────────────────────────────
+function extractDate(text) {
+  const m = text.match(/(\d{2}\/\d{2}\/\d{4})/);
+  return m ? m[1] : '';
+}
+
+// ──────────────────────────────────────────────
+//  📦 ดึงข้อมูลพัสดุแต่ละชิ้น
+//  หาจาก tracking number แล้ว scan บรรทัดข้างๆ
+// ──────────────────────────────────────────────
+function extractParcels(text) {
+  const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
+
+  // Tracking number patterns:
+  //   Flash: TH + อักขระ A-Z0-9 ยาว ≥ 10  เช่น TH01168WQUUY1A0
+  //   EMS:   2 ตัวอักษร + ตัวเลข + TH       เช่น OB359984489TH
+  const trackingRx = /\b(TH[A-Z0-9]{10,}|[A-Z]{2}\d{8,}TH)\b/;
+  const phoneRx    = /0\d{9}/g;
+
+  const parcels = [];
+
+  for (let i = 0; i < lines.length; i++) {
+    const tm = lines[i].match(trackingRx);
+    if (!tm) continue;
+
+    const tracking = tm[1];
+
+    // ── หา Courier (ดูย้อนหลัง 4 บรรทัด) ──
+    let courier = '';
+    for (let j = Math.max(0, i - 4); j < i; j++) {
+      if (/flash/i.test(lines[j]))                 { courier = 'Flash Express';       break; }
+      if (/ems|ไปรษณ/i.test(lines[j]))             { courier = 'EMS (ไปรษณีย์ไทย)'; break; }
+      if (/kerry/i.test(lines[j]))                  { courier = 'Kerry Express';       break; }
+      if (/j&t|jnt/i.test(lines[j]))               { courier = 'J&T Express';         break; }
+      if (/thaipost|thailand.post/i.test(lines[j])){ courier = 'EMS (ไปรษณีย์ไทย)'; break; }
+    }
+    // ถ้ายังไม่เจอ ดูในบรรทัดเดียวกัน
+    if (!courier) {
+      if (/flash/i.test(lines[i]))   courier = 'Flash Express';
+      else if (/ems/i.test(lines[i])) courier = 'EMS (ไปรษณีย์ไทย)';
+    }
+
+    // ── หา Phone + ชื่อผู้รับ + ที่อยู่ (ดูข้างหน้า 6 บรรทัด) ──
+    let phone     = '';
+    let recipient = '';
+    let address   = '';
+
+    for (let j = i + 1; j < Math.min(lines.length, i + 7); j++) {
+      // ข้ามบรรทัดที่มีราคา (มี .00 บ.)
+      if (/\d+\.\d{2}\s*บ/.test(lines[j])) continue;
+      // หยุดถ้าเจอ tracking ชิ้นถัดไป
+      if (trackingRx.test(lines[j]) && lines[j] !== lines[i]) break;
+
+      // หา phone
+      const phones = [...lines[j].matchAll(phoneRx)];
+      if (phones.length && !phone) {
+        phone = phones[0][0];
+        // ชื่อ = ข้อความที่เหลือในบรรทัดนั้น
+        const namePart = lines[j].replace(phone, '').trim();
+        if (namePart.length > 1) recipient = namePart;
+      }
+
+      // หาที่อยู่ (บรรทัดที่มีรหัสไปรษณีย์ 5 หลัก)
+      if (!address && /\d{5}/.test(lines[j]) && !trackingRx.test(lines[j])) {
+        address = lines[j];
+      }
+    }
+
+    parcels.push({ tracking, courier, recipient, phone, address });
+  }
+
+  return parcels;
+}
+
+// ──────────────────────────────────────────────
+//  📝 Format แยกเป็นข้อความทีละรายการ (array of string)
+// ──────────────────────────────────────────────
+function formatParcels({ date, parcels }) {
+  if (parcels.length === 0) {
+    return ['❌ ไม่พบข้อมูลพัสดุในไฟล์นี้ค่ะ\nกรุณาตรวจสอบว่าส่งไฟล์ PDF บิลค่าส่งถูกต้องหรือไม่'];
+  }
+
+  const dateStr = date ? ` ${date}` : '';
+
+  return parcels.map((p, i) => {
+    const lines = [
+      `📦 พัสดุที่ ${i + 1}/${parcels.length}${dateStr}`,
+      '─'.repeat(22),
+    ];
+    lines.push(`🔢 ${p.tracking}`);
+    if (p.courier)   lines.push(`🚚 ${p.courier}`);
+    if (p.recipient) lines.push(`👤 ${p.recipient}`);
+    if (p.phone)     lines.push(`☎️  ${p.phone}`);
+    if (p.address)   lines.push(`📍 ${p.address}`);
+    lines.push('─'.repeat(22));
+    lines.push('🏪 ร้าน ซี.เค.แอร์คอนด์');
+    return lines.join('\n');
+  });
+}
+
+module.exports = { parseBillPDF, formatParcels };
