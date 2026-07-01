@@ -120,21 +120,29 @@ function formatParcels({ date, parcels }) {
   }
 
   const dateStr = date ? ` ${date}` : '';
+  const messages = [];
 
-  return parcels.map((p, i) => {
-    const lines = [
+  for (let i = 0; i < parcels.length; i++) {
+    const p = parcels[i];
+
+    // Bubble 1: ข้อมูลพัสดุ
+    const info = [
       `📦 พัสดุที่ ${i + 1}/${parcels.length}${dateStr}`,
       '─'.repeat(22),
     ];
-    lines.push(`🔢 ${p.tracking}`);
-    if (p.courier)   lines.push(`🚚 ${p.courier}`);
-    if (p.recipient) lines.push(`👤 ${p.recipient}`);
-    if (p.phone)     lines.push(`☎️  ${p.phone}`);
-    if (p.address)   lines.push(`📍 ${p.address}`);
-    lines.push('─'.repeat(22));
-    lines.push('🏪 ร้าน ซี.เค.แอร์คอนด์');
-    return lines.join('\n');
-  });
+    if (p.courier)   info.push(`🚚 ${p.courier}`);
+    if (p.recipient) info.push(`👤 ${p.recipient}`);
+    if (p.phone)     info.push(`☎️  ${p.phone}`);
+    if (p.address)   info.push(`📍 ${p.address}`);
+    info.push('─'.repeat(22));
+    info.push('🏪 ร้าน ซี.เค.แอร์คอนด์');
+    messages.push(info.join('\n'));
+
+    // Bubble 2: เลขพัสดุอย่างเดียว (กดค้างคัดลอกได้ง่าย)
+    messages.push(p.tracking);
+  }
+
+  return messages;
 }
 
 module.exports = { parseBillPDF, formatParcels };
