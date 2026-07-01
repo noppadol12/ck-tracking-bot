@@ -33,16 +33,18 @@ function extractDate(text) {
 function extractParcels(text) {
   const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
 
-  // Tracking number patterns:
-  //   Flash: TH + อักขระ A-Z0-9 ยาว ≥ 10  เช่น TH01168WQUUY1A0
-  //   EMS:   2 ตัวอักษร + ตัวเลข + TH       เช่น OB359984489TH
-  const trackingRx = /\b(TH[A-Z0-9]{10,}|[A-Z]{2}\d{8,}TH)\b/;
-  const phoneRx    = /0\d{9}/g;
+  // Flash: TH + A-Z0-9 ≥10 ตัว, หยุดก่อนราคา (ราคาขึ้นต้น [1-9] ไม่ใช่ 0)
+  // EMS:   2 ตัวอักษร + ตัวเลข 8+ + TH
+  const flashRx   = /(TH[A-Z0-9]{10,}?)(?=[1-9]\d*\.\d{2}|\s|$)/;
+  const emsRx     = /([A-Z]{2}\d{8,}TH)/;
+  const anyRx     = (line) => line.match(flashRx) || line.match(emsRx);
+  const phoneRx   = /0\d{9}/g;
 
   const parcels = [];
 
   for (let i = 0; i < lines.length; i++) {
-    const tm = lines[i].match(trackingRx);
+    const line = lines[i];
+    const tm   = anyRx(line);
     if (!tm) continue;
 
     const tracking = tm[1];
@@ -50,41 +52,56 @@ function extractParcels(text) {
     // ── หา Courier (ดูย้อนหลัง 4 บรรทัด) ──
     let courier = '';
     for (let j = Math.max(0, i - 4); j < i; j++) {
-      if (/flash/i.test(lines[j]))                 { courier = 'Flash Express';       break; }
-      if (/ems|ไปรษณ/i.test(lines[j]))             { courier = 'EMS (ไปรษณีย์ไทย)'; break; }
-      if (/kerry/i.test(lines[j]))                  { courier = 'Kerry Express';       break; }
-      if (/j&t|jnt/i.test(lines[j]))               { courier = 'J&T Express';         break; }
-      if (/thaipost|thailand.post/i.test(lines[j])){ courier = 'EMS (ไปรษณีย์ไทย)'; break; }
+      if (/flash/i.test(lines[j]))                  { courier = 'Flash Express';       break; }
+      if (/ems|ไปรษณ/i.test(lines[j]))              { courier = 'EMS (ไปรษณีย์ไทย)'; break; }
+      if (/kerry/i.test(lines[j]))                   { courier = 'Kerry Express';       break; }
+      if (/j&t|jnt/i.test(lines[j]))                { courier = 'J&T Express';         break; }
+      if (/thaipost|thailand.post/i.test(lines[j])) { courier = 'EMS (ไปรษณีย์ไทย)'; break; }
     }
-    // ถ้ายังไม่เจอ ดูในบรรทัดเดียวกัน
     if (!courier) {
-      if (/flash/i.test(lines[i]))   courier = 'Flash Express';
+      if (/flash/i.test(lines[i]))    courier = 'Flash Express';
       else if (/ems/i.test(lines[i])) courier = 'EMS (ไปรษณีย์ไทย)';
     }
 
-    // ── หา Phone + ชื่อผู้รับ + ที่อยู่ (ดูข้างหน้า 6 บรรทัด) ──
+    // ── หา Phone + ชื่อผู้รับ + ที่อยู่ (ดูข้างหน้า 8 บรรทัด) ──
     let phone     = '';
     let recipient = '';
     let address   = '';
 
-    for (let j = i + 1; j < Math.min(lines.length, i + 7); j++) {
-      // ข้ามบรรทัดที่มีราคา (มี .00 บ.)
+    for (let j = i + 1; j < Math.min(lines.length, i + 9); j++) {
+      // ข้ามบรรทัดที่มีราคา
       if (/\d+\.\d{2}\s*บ/.test(lines[j])) continue;
+      // ข้ามบรรทัด Speed / ขนาด / น้ำหนัก
+      if (/^(Speed|ขนาด|น.{0,2}หนัก|ค่า)/i.test(lines[j])) continue;
       // หยุดถ้าเจอ tracking ชิ้นถัดไป
-      if (trackingRx.test(lines[j]) && lines[j] !== lines[i]) break;
+      if (anyRx(lines[j])) break;
 
-      // หา phone
+      // หา phone (10 หลักขึ้นต้น 0)
       const phones = [...lines[j].matchAll(phoneRx)];
       if (phones.length && !phone) {
         phone = phones[0][0];
-        // ชื่อ = ข้อความที่เหลือในบรรทัดนั้น
-        const namePart = lines[j].replace(phone, '').trim();
+        // ชื่อผู้รับ = เอาคำว่า "ผู้รับ" ออก แล้วเอาข้อความก่อน phone
+        const namePart = lines[j]
+          .replace(/^ผู้รับ\s*/u, '')   // ตัด "ผู้รับ " นำหน้า
+          .replace(phone, '')
+          .trim();
         if (namePart.length > 1) recipient = namePart;
       }
 
-      // หาที่อยู่ (บรรทัดที่มีรหัสไปรษณีย์ 5 หลัก)
-      if (!address && /\d{5}/.test(lines[j]) && !trackingRx.test(lines[j])) {
-        address = lines[j];
+      // หาที่อยู่ (บรรทัดที่มีรหัสไปรษณีย์ 5 หลัก และไม่ใช่บรรทัด phone)
+      if (!address && /\d{5}/.test(lines[j]) && !phones.length) {
+        let addr = lines[j];
+        // ดูย้อนกลับ 1-2 บรรทัด หาส่วนหน้าของที่อยู่ที่ถูกตัด
+        for (let k = j - 1; k >= Math.max(i + 1, j - 2); k--) {
+          const prev = lines[k];
+          if (!prev || /\d+\.\d{2}/.test(prev) || /^(Speed|ขนาด|น.{0,2}หนัก|ค่า|\d+\.)/i.test(prev)) break;
+          if (prev.length > 0 && prev.length < 20 && !/\d{5}/.test(prev) && !anyRx(prev)) {
+            addr = prev + addr;
+          }
+        }
+        // ตัดข้อความเกินออก (หยุดก่อน "3. ส่งใบเสร็จ" หรือบรรทัดที่ไม่ใช่ที่อยู่)
+        addr = addr.replace(/\s*\d+\.\s*ส่ง.*$/u, '').trim();
+        address = addr;
       }
     }
 
