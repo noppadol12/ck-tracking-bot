@@ -1,6 +1,8 @@
 // ============================================================
 //  lib/pdfParser.js — อ่าน PDF บิลค่าส่ง แล้วดึงข้อมูลพัสดุ
 //  รองรับ: Flash Express, EMS (ไปรษณีย์ไทย)
+//  - PDF มี text layer → ใช้ pdf-parse
+//  - PDF เป็น image (สแกน) → ใช้ Claude Vision API
 // ============================================================
 
 const pdfParse = require('pdf-parse');
@@ -9,15 +11,90 @@ const pdfParse = require('pdf-parse');
 //  🔍 Main: รับ Buffer → คืน { date, parcels[] }
 // ──────────────────────────────────────────────
 async function parseBillPDF(buffer) {
+  // ลองอ่าน text ก่อน
   const data = await pdfParse(buffer);
-  const text = data.text;
-  // Log ทั้งหมดเพื่อ debug (ดูใน Vercel → Functions → Logs)
-  console.log('===PDF FULL TEXT START===');
-  console.log(text);
-  console.log('===PDF FULL TEXT END===');
+  const text = (data.text || '').trim();
+  console.log('PDF text length:', text.length, '| preview:', text.slice(0, 100));
 
-  const date    = extractDate(text);
-  const parcels = extractParcels(text);
+  // ถ้ามี text จริง ใช้ regex parser
+  if (text.length > 20) {
+    const date    = extractDate(text);
+    const parcels = extractParcels(text);
+    if (parcels.length > 0) return { date, parcels };
+    // มี text แต่หา tracking ไม่เจอ → ลอง Claude ต่อ
+  }
+
+  // Image PDF → ใช้ Claude Vision API
+  console.log('Image PDF detected → using Claude Vision');
+  return parsePDFWithClaude(buffer);
+}
+
+// ──────────────────────────────────────────────
+//  🤖 Claude Vision fallback สำหรับ image PDF
+// ──────────────────────────────────────────────
+async function parsePDFWithClaude(buffer) {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) throw new Error('ไม่มี ANTHROPIC_API_KEY — กรุณาเพิ่มใน Vercel Environment Variables');
+
+  const base64 = buffer.toString('base64');
+
+  const res = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'Content-Type':      'application/json',
+      'x-api-key':         apiKey,
+      'anthropic-version': '2023-06-01',
+    },
+    body: JSON.stringify({
+      model:      'claude-haiku-4-5-20251001',
+      max_tokens: 1024,
+      messages: [{
+        role: 'user',
+        content: [
+          {
+            type:   'document',
+            source: { type: 'base64', media_type: 'application/pdf', data: base64 },
+          },
+          {
+            type: 'text',
+            text: `อ่านบิลค่าส่งนี้และดึงข้อมูลพัสดุทุกรายการ
+ตอบในรูปแบบ JSON array เท่านั้น ห้ามมีข้อความอื่น:
+[
+  {
+    "tracking": "เลขพัสดุ",
+    "courier": "ชื่อขนส่ง",
+    "recipient": "ชื่อผู้รับ",
+    "phone": "เบอร์โทร 10 หลัก",
+    "address": "ที่อยู่ผู้รับ"
+  }
+]
+ถ้าไม่พบพัสดุให้ตอบ []`,
+          },
+        ],
+      }],
+    }),
+  });
+
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error('Claude API error: ' + err.slice(0, 200));
+  }
+
+  const json    = await res.json();
+  const content = json?.content?.[0]?.text || '[]';
+  console.log('Claude response:', content.slice(0, 300));
+
+  let parcels = [];
+  try {
+    parcels = JSON.parse(content.match(/\[[\s\S]*\]/)?.[0] || '[]');
+  } catch (e) {
+    console.error('JSON parse error:', e.message);
+  }
+
+  // ดึง date จาก content ถ้ามี
+  const dateMatch = content.match(/(\d{2}\/\d{2}\/\d{4})/);
+  const date      = dateMatch ? dateMatch[1] : '';
+
   return { date, parcels };
 }
 
