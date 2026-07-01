@@ -3,7 +3,6 @@
 //  ไลน์บอทแจ้งเลขพัสดุ — ร้าน ซี.เค.แอร์คอนด์
 // ============================================================
 
-const { generateTrackingImage } = require('../lib/imageGen');
 const { parseBillPDF, formatParcels } = require('../lib/pdfParser');
 
 // In-memory state
@@ -37,34 +36,23 @@ async function handleFileMessage(event) {
   const messageId  = event.message.id;
   const fileName   = event.message.fileName || '';
 
-  // รองรับเฉพาะ PDF
   if (!fileName.toLowerCase().endsWith('.pdf')) {
     return replyToLine(replyToken, [{
       type: 'text',
-      text: '❌ รองรับเฉพาะไฟล์ PDF ค่ะ\nกรุณาส่งบิลค่าส่ง (.pdf) เข้ามาค่ะ',
+      text: '❌ รองรับเฉพาะไฟล์ PDF ค่ะ',
     }]);
   }
 
-  // แจ้งว่ากำลังประมวลผล
   await replyToLine(replyToken, [{
     type: 'text',
     text: '⏳ กำลังอ่านข้อมูลพัสดุจากบิล กรุณารอสักครู่ค่ะ...',
   }]);
 
   try {
-    // ดาวน์โหลดไฟล์จาก LINE
-    const buffer = await downloadLineFile(messageId);
-
-    // Parse PDF → ได้ array ของข้อความแยกตามผู้รับ
+    const buffer   = await downloadLineFile(messageId);
     const result   = await parseBillPDF(buffer);
-    const messages = formatParcels(result);  // คืน string[]
+    const messages = formatParcels(result);
 
-    if (messages.length === 0 || (messages.length === 1 && messages[0].startsWith('❌'))) {
-      await pushToLine(event.source.userId, [{ type: 'text', text: messages[0] }]);
-      return;
-    }
-
-    // Push ทีละรายการ แยกข้อความแต่ละผู้รับ
     for (const text of messages) {
       await pushToLine(event.source.userId, [{ type: 'text', text }]);
     }
@@ -72,7 +60,7 @@ async function handleFileMessage(event) {
     console.error('PDF error:', err.message);
     await pushToLine(event.source.userId, [{
       type: 'text',
-      text: `❌ อ่านไฟล์ไม่ได้ค่ะ (${err.message})\nกรุณาลองส่งไฟล์ใหม่ค่ะ`,
+      text: `❌ อ่านไฟล์ไม่ได้ค่ะ (${err.message})`,
     }]);
   }
 }
@@ -86,8 +74,7 @@ async function downloadLineFile(messageId) {
     { headers: { Authorization: 'Bearer ' + process.env.LINE_CHANNEL_ACCESS_TOKEN } }
   );
   if (!res.ok) throw new Error(`ดาวน์โหลดไฟล์ไม่ได้: HTTP ${res.status}`);
-  const arrayBuffer = await res.arrayBuffer();
-  return Buffer.from(arrayBuffer);
+  return Buffer.from(await res.arrayBuffer());
 }
 
 // ──────────────────────────────────────────────
@@ -101,16 +88,16 @@ async function handleTextMessage(event) {
 
   if (['เริ่มใหม่', 'เมนู', 'menu', 'start'].includes(text.toLowerCase())) {
     delete userState[userId];
-    return sendQuickReplyCourier(replyToken);
+    return sendWelcome(replyToken);
   }
 
   if (state.startsWith('WAIT_TRACKING_')) {
     const carrier = state.replace('WAIT_TRACKING_', '');
     delete userState[userId];
-    return processTracking(replyToken, carrier, text);
+    return replyTrackingNumber(replyToken, carrier, text);
   }
 
-  return sendQuickReplyCourier(replyToken);
+  return sendWelcome(replyToken);
 }
 
 // ──────────────────────────────────────────────
@@ -123,19 +110,22 @@ async function handlePostback(event) {
   const carrier    = (params.carrier || 'EMS').toUpperCase();
 
   userState[userId] = 'WAIT_TRACKING_' + carrier;
-  return askTrackingNumber(replyToken, carrier);
+  return replyToLine(replyToken, [{
+    type: 'text',
+    text: `✅ เลือก ${carrier === 'EMS' ? '📮 EMS (ไปรษณีย์ไทย)' : '⚡ Flash Express'} แล้วค่ะ\n\nกรุณาพิมพ์เลขพัสดุค่ะ`,
+  }]);
 }
 
 // ──────────────────────────────────────────────
-//  💬 Quick Reply — เลือกขนส่ง
+//  💬 Welcome + Quick Reply
 // ──────────────────────────────────────────────
-async function sendQuickReplyCourier(replyToken) {
+async function sendWelcome(replyToken) {
   return replyToLine(replyToken, [{
     type: 'text',
-    text: '🚚 สวัสดีค่ะ! ร้าน ซี.เค.แอร์คอนด์\n\nส่งอะไรมาได้เลยค่ะ:\n📎 ส่งไฟล์ PDF บิลค่าส่ง → แสดงเลขพัสดุทั้งหมด\n📦 หรือเลือกขนส่งด้านล่างเพื่อแจ้งเลขเดี่ยว',
+    text: '🚚 สวัสดีค่ะ! ร้าน ซี.เค.แอร์คอนด์\n\n📎 ส่งไฟล์ PDF บิลค่าส่ง → แสดงเลขพัสดุทั้งหมด\n📦 หรือเลือกขนส่งด้านล่างเพื่อพิมพ์เลขเดี่ยว',
     quickReply: {
       items: [
-        { type: 'action', action: { type: 'postback', label: '📮 EMS',   data: 'carrier=EMS',   displayText: 'EMS (ไปรษณีย์ไทย)' } },
+        { type: 'action', action: { type: 'postback', label: '📮 EMS',   data: 'carrier=EMS',   displayText: 'EMS' } },
         { type: 'action', action: { type: 'postback', label: '⚡ Flash', data: 'carrier=FLASH', displayText: 'Flash Express' } },
       ],
     },
@@ -143,35 +133,27 @@ async function sendQuickReplyCourier(replyToken) {
 }
 
 // ──────────────────────────────────────────────
-//  💬 ถามเลขพัสดุ
+//  📦 ตอบเลขพัสดุเป็นข้อความ (ไม่มีรูป)
 // ──────────────────────────────────────────────
-async function askTrackingNumber(replyToken, carrier) {
-  const label = carrier === 'EMS' ? '📮 EMS (ไปรษณีย์ไทย)' : '⚡ Flash Express';
-  return replyToLine(replyToken, [{ type: 'text', text: `✅ เลือก ${label} แล้วค่ะ\n\nกรุณาพิมพ์เลขพัสดุของคุณค่ะ` }]);
-}
-
-// ──────────────────────────────────────────────
-//  🔍 สร้างรูปภาพเลขพัสดุ → ส่งลูกค้า
-// ──────────────────────────────────────────────
-async function processTracking(replyToken, carrier, trackingNumber) {
-  let imageUrl;
-  try {
-    imageUrl = await generateTrackingImage(carrier, trackingNumber);
-  } catch (err) {
-    console.error('Image error:', err.message);
-    const carrierName = carrier === 'EMS' ? 'EMS (ไปรษณีย์ไทย)' : 'Flash Express';
-    return replyToLine(replyToken, [{
-      type: 'text',
-      text: `📦 เลขพัสดุ: ${trackingNumber}\n🚚 ขนส่ง: ${carrierName}\n\n🏪 ร้าน ซี.เค.แอร์คอนด์`,
-    }]);
-  }
-
+async function replyTrackingNumber(replyToken, carrier, trackingNumber) {
+  const carrierName = carrier === 'EMS' ? 'EMS (ไปรษณีย์ไทย)' : 'Flash Express';
   return replyToLine(replyToken, [
-    { type: 'image', originalContentUrl: imageUrl, previewImageUrl: imageUrl },
     {
       type: 'text',
-      text: 'พิมพ์ "เริ่มใหม่" เพื่อส่งเลขพัสดุชิ้นอื่นค่ะ 😊',
-      quickReply: { items: [{ type: 'action', action: { type: 'message', label: '🔄 เริ่มใหม่', text: 'เริ่มใหม่' } }] },
+      text: [
+        `📦 เลขพัสดุ`,
+        `──────────────────────`,
+        `🚚 ${carrierName}`,
+        `──────────────────────`,
+        `🏪 ร้าน ซี.เค.แอร์คอนด์`,
+      ].join('\n'),
+    },
+    {
+      type: 'text',
+      text: trackingNumber.toUpperCase(),
+      quickReply: {
+        items: [{ type: 'action', action: { type: 'message', label: '🔄 เริ่มใหม่', text: 'เริ่มใหม่' } }],
+      },
     },
   ]);
 }
@@ -185,13 +167,11 @@ async function replyToLine(replyToken, messages) {
     headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + process.env.LINE_CHANNEL_ACCESS_TOKEN },
     body: JSON.stringify({ replyToken, messages }),
   });
-  const text = await res.text();
-  if (!res.ok) console.error('LINE reply error:', text);
-  else console.log('LINE reply ok');
+  if (!res.ok) console.error('LINE reply error:', await res.text());
 }
 
 // ──────────────────────────────────────────────
-//  📡 LINE Push API (ใช้หลัง reply token หมดอายุ)
+//  📡 LINE Push API
 // ──────────────────────────────────────────────
 async function pushToLine(userId, messages) {
   const res = await fetch('https://api.line.me/v2/bot/message/push', {
@@ -199,7 +179,5 @@ async function pushToLine(userId, messages) {
     headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + process.env.LINE_CHANNEL_ACCESS_TOKEN },
     body: JSON.stringify({ to: userId, messages }),
   });
-  const text = await res.text();
-  if (!res.ok) console.error('LINE push error:', text);
-  else console.log('LINE push ok');
+  if (!res.ok) console.error('LINE push error:', await res.text());
 }
