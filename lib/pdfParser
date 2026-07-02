@@ -57,20 +57,19 @@ async function parsePDFWithClaude(buffer) {
           },
           {
             type: 'text',
-            text: `นี่คือบิลค่าส่งพัสดุจากบริษัทขนส่ง อ่านและดึงข้อมูลพัสดุทุกรายการ
+            text: `นี่คือบิลค่าส่งพัสดุ อ่านและดึงข้อมูลพัสดุทุกรายการ
 
-กฎสำคัญ — อ่านให้ละเอียด:
-- "tracking" = เลขพัสดุ เช่น TH01168WQUUY1A0 (คัดลอกทุกตัวอักษรให้ถูกต้อง ห้ามผิด)
+กฎสำคัญ:
+- "date" = วันที่บนบิล รูปแบบ DD/MM/YYYY
+- "tracking" = เลขพัสดุ เช่น TH01168WQUUY1A0 (คัดลอกทุกตัวอักษรให้ถูกต้อง)
 - "courier" = ชื่อขนส่ง เช่น Flash Express, EMS, Kerry Express
-- "recipient" = ชื่อ-นามสกุลผู้รับพัสดุ ที่อยู่หลังคำว่า "ผู้รับ" (ไม่ใช่ชื่อผู้ส่ง)
-- "phone" = เบอร์โทรของผู้รับพัสดุ ที่อยู่ใกล้ชื่อผู้รับ (ห้ามใช้เบอร์ติดต่อสาขาหรือเบอร์ผู้ส่งที่อยู่ในหัวบิล)
-- "address" = ที่อยู่จัดส่งของผู้รับ (ตำบล อำเภอ จังหวัด รหัสไปรษณีย์)
+- "phone" = เบอร์โทร 10 หลักของผู้รับพัสดุ ที่อยู่ใกล้ชื่อผู้รับ ห้ามใช้เบอร์ในหัวบิล (เบอร์สาขา)
+- "address" = ที่อยู่จัดส่ง (ตำบล อำเภอ จังหวัด รหัสไปรษณีย์)
 
-โครงสร้างบิล: หัวบิล (ชื่อสาขา เบอร์สาขา) → รายการพัสดุแต่ละชิ้น (ผู้ส่ง → เลขพัสดุ → ผู้รับ+เบอร์ → ที่อยู่)
-เบอร์ที่อยู่ในหัวบิล = เบอร์สาขา ห้ามนำมาใส่ใน phone
+โครงสร้างบิล: หัวบิล(เบอร์สาขา) → พัสดุแต่ละชิ้น(เลขพัสดุ → ผู้รับ+เบอร์ผู้รับ → ที่อยู่)
 
-ตอบเป็น JSON array เท่านั้น ห้ามมีข้อความอื่น:
-[{"tracking":"...","courier":"...","recipient":"...","phone":"...","address":"..."}]
+ตอบเป็น JSON array เท่านั้น:
+[{"date":"...","tracking":"...","courier":"...","phone":"...","address":"..."}]
 
 ถ้าไม่พบพัสดุให้ตอบ []`,
           },
@@ -95,9 +94,10 @@ async function parsePDFWithClaude(buffer) {
     console.error('JSON parse error:', e.message);
   }
 
-  // ดึง date จาก content ถ้ามี
-  const dateMatch = content.match(/(\d{2}\/\d{2}\/\d{4})/);
-  const date      = dateMatch ? dateMatch[1] : '';
+  // ดึง date จาก parcel หรือ content
+  const date = parcels[0]?.date || content.match(/(\d{2}\/\d{2}\/\d{4})/)?.[1] || '';
+  // ลบ date field ออกจาก parcel objects (เก็บไว้ที่ระดับ top เท่านั้น)
+  parcels.forEach(p => delete p.date);
 
   return { date, parcels };
 }
@@ -209,14 +209,13 @@ function formatParcels({ date, parcels }) {
   for (let i = 0; i < parcels.length; i++) {
     const p = parcels[i];
 
-    // Bubble 1: ข้อมูลพัสดุ (label ชัดเจน)
+    // Bubble 1: ข้อมูลพัสดุ
     const info = [
       `📦 พัสดุที่ ${i + 1}/${parcels.length}${dateStr}`,
       '─'.repeat(24),
-      `🚚 ขนส่ง : ${p.courier  || '-'}`,
-      `👤 ผู้รับ : ${p.recipient || '-'}`,
-      `☎️  เบอร์  : ${p.phone    || '-'}`,
-      `📍 ที่อยู่ : ${p.address  || '-'}`,
+      `🚚 ขนส่ง   : ${p.courier || '-'}`,
+      `☎️  เบอร์   : ${p.phone   || '-'}`,
+      `📍 ที่อยู่  : ${p.address || '-'}`,
       '─'.repeat(24),
       '🏪 ร้าน ซี.เค.แอร์คอนด์',
     ];
