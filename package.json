@@ -9,7 +9,5 @@
   "scripts": {
     "dev": "vercel dev"
   },
-  "dependencies": {
-    "pdf-parse": "^1.1.1"
-  }
+  "dependencies": {}
 }
