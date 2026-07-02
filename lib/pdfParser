@@ -57,17 +57,21 @@ async function parsePDFWithClaude(buffer) {
           },
           {
             type: 'text',
-            text: `อ่านบิลค่าส่งนี้และดึงข้อมูลพัสดุทุกรายการ
-ตอบในรูปแบบ JSON array เท่านั้น ห้ามมีข้อความอื่น:
-[
-  {
-    "tracking": "เลขพัสดุ",
-    "courier": "ชื่อขนส่ง",
-    "recipient": "ชื่อผู้รับ",
-    "phone": "เบอร์โทร 10 หลัก",
-    "address": "ที่อยู่ผู้รับ"
-  }
-]
+            text: `นี่คือบิลค่าส่งพัสดุจากบริษัทขนส่ง อ่านและดึงข้อมูลพัสดุทุกรายการ
+
+กฎสำคัญ — อ่านให้ละเอียด:
+- "tracking" = เลขพัสดุ เช่น TH01168WQUUY1A0 (คัดลอกทุกตัวอักษรให้ถูกต้อง ห้ามผิด)
+- "courier" = ชื่อขนส่ง เช่น Flash Express, EMS, Kerry Express
+- "recipient" = ชื่อ-นามสกุลผู้รับพัสดุ ที่อยู่หลังคำว่า "ผู้รับ" (ไม่ใช่ชื่อผู้ส่ง)
+- "phone" = เบอร์โทรของผู้รับพัสดุ ที่อยู่ใกล้ชื่อผู้รับ (ห้ามใช้เบอร์ติดต่อสาขาหรือเบอร์ผู้ส่งที่อยู่ในหัวบิล)
+- "address" = ที่อยู่จัดส่งของผู้รับ (ตำบล อำเภอ จังหวัด รหัสไปรษณีย์)
+
+โครงสร้างบิล: หัวบิล (ชื่อสาขา เบอร์สาขา) → รายการพัสดุแต่ละชิ้น (ผู้ส่ง → เลขพัสดุ → ผู้รับ+เบอร์ → ที่อยู่)
+เบอร์ที่อยู่ในหัวบิล = เบอร์สาขา ห้ามนำมาใส่ใน phone
+
+ตอบเป็น JSON array เท่านั้น ห้ามมีข้อความอื่น:
+[{"tracking":"...","courier":"...","recipient":"...","phone":"...","address":"..."}]
+
 ถ้าไม่พบพัสดุให้ตอบ []`,
           },
         ],
@@ -205,21 +209,21 @@ function formatParcels({ date, parcels }) {
   for (let i = 0; i < parcels.length; i++) {
     const p = parcels[i];
 
-    // Bubble 1: ข้อมูลพัสดุ
+    // Bubble 1: ข้อมูลพัสดุ (label ชัดเจน)
     const info = [
       `📦 พัสดุที่ ${i + 1}/${parcels.length}${dateStr}`,
-      '─'.repeat(22),
+      '─'.repeat(24),
+      `🚚 ขนส่ง : ${p.courier  || '-'}`,
+      `👤 ผู้รับ : ${p.recipient || '-'}`,
+      `☎️  เบอร์  : ${p.phone    || '-'}`,
+      `📍 ที่อยู่ : ${p.address  || '-'}`,
+      '─'.repeat(24),
+      '🏪 ร้าน ซี.เค.แอร์คอนด์',
     ];
-    if (p.courier)   info.push(`🚚 ${p.courier}`);
-    if (p.recipient) info.push(`👤 ${p.recipient}`);
-    if (p.phone)     info.push(`☎️  ${p.phone}`);
-    if (p.address)   info.push(`📍 ${p.address}`);
-    info.push('─'.repeat(22));
-    info.push('🏪 ร้าน ซี.เค.แอร์คอนด์');
     messages.push(info.join('\n'));
 
-    // Bubble 2: เลขพัสดุอย่างเดียว (กดค้างคัดลอกได้ง่าย)
-    messages.push(p.tracking);
+    // Bubble 2: เลขพัสดุอย่างเดียว → กดค้างคัดลอกได้ทันที
+    messages.push(`📮 เลขพัสดุ :\n${p.tracking || '-'}`);
   }
 
   return messages;
