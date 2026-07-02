@@ -3,7 +3,7 @@
 //  ไลน์บอทแจ้งเลขพัสดุ — ร้าน ซี.เค.แอร์คอนด์
 // ============================================================
 
-const { parseBillPDF, formatParcels } = require('../lib/pdfParser');
+const { parseBillPDF, formatTrackings } = require('../lib/pdfParser');
 
 // In-memory state
 const userState = {};
@@ -50,8 +50,8 @@ async function handleFileMessage(event) {
 
   try {
     const buffer   = await downloadLineFile(messageId);
-    const result   = await parseBillPDF(buffer);
-    const messages = formatParcels(result);
+    const trackings = await parseBillPDF(buffer);
+    const messages  = formatTrackings(trackings);
 
     for (const text of messages) {
       await pushToLine(event.source.userId, [{ type: 'text', text }]);
