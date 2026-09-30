@@ -1,5 +1,5 @@
 // ============================================================
-//  lib/pdfParser.js — ดึงเลขพัสดุจาก PDF บิลค่าส่ง
+//  lib/pdfParser.js — ดึงเลขพัสดุ + ชื่อผู้รับ จาก PDF บิลค่าส่ง
 //  - PDF มี text layer → regex (ประหยัด quota)
 //  - PDF เป็น image → Claude Vision API (fallback)
 // ============================================================
@@ -7,7 +7,7 @@
 const pdfParse = require('pdf-parse');
 
 // ──────────────────────────────────────────────
-//  🔍 Main: รับ Buffer → คืน array ของเลขพัสดุ
+//  🔍 Main: รับ Buffer → คืน array ของ { tracking, recipient }
 // ──────────────────────────────────────────────
 async function parseBillPDF(buffer) {
   const data = await pdfParse(buffer);
@@ -15,10 +15,10 @@ async function parseBillPDF(buffer) {
   console.log('PDF text length:', text.length);
 
   if (text.length > 20) {
-    const trackings = extractTrackingNumbers(text);
-    if (trackings.length > 0) {
-      console.log('Regex found:', trackings);
-      return trackings;
+    const parcels = extractParcels(text);
+    if (parcels.length > 0) {
+      console.log('Regex found:', parcels);
+      return parcels;
     }
   }
 
@@ -28,21 +28,44 @@ async function parseBillPDF(buffer) {
 }
 
 // ──────────────────────────────────────────────
-//  📦 Regex: ดึงเลขพัสดุจาก text
+//  📦 Regex: ดึงเลขพัสดุ + ชื่อผู้รับ จาก text
 // ──────────────────────────────────────────────
-function extractTrackingNumbers(text) {
-  const results = new Set();
+function extractParcels(text) {
+  const lines  = text.split('\n').map(l => l.trim()).filter(Boolean);
+  const flashRx = /(TH[A-Z0-9]{10,}?)(?=[1-9]\d*\.\d{2}|\s|$)/;
+  const emsRx   = /([A-Z]{2}\d{8,}TH)/;
+  const anyRx   = (line) => line.match(flashRx) || line.match(emsRx);
 
-  // Flash Express: TH + ตัวอักษร/ตัวเลข ≥10 ตัว (หยุดก่อนราคา เช่น 43.00)
-  const flashRx = /(TH[A-Z0-9]{10,}?)(?=[1-9]\d*\.\d{2}|\s|$)/g;
-  // EMS: 2 ตัวอักษร + ตัวเลข 8+ + TH
-  const emsRx = /([A-Z]{2}\d{8,}TH)/g;
+  const parcels = [];
+  const seen    = new Set();
 
-  let m;
-  while ((m = flashRx.exec(text)) !== null) results.add(m[1]);
-  while ((m = emsRx.exec(text)) !== null) results.add(m[1]);
+  for (let i = 0; i < lines.length; i++) {
+    const tm = anyRx(lines[i]);
+    if (!tm) continue;
 
-  return [...results];
+    const tracking = tm[1];
+    if (seen.has(tracking)) continue;
+    seen.add(tracking);
+
+    // หาชื่อผู้รับ (ดูข้างหน้า 8 บรรทัด)
+    let recipient = '';
+    for (let j = i + 1; j < Math.min(lines.length, i + 9); j++) {
+      if (anyRx(lines[j])) break;
+
+      // "ผู้รับ [ชื่อ]" หรือ "ผู้รับ [ชื่อ] [เบอร์]"
+      const m = lines[j].match(/^ผู้รับ\s+(.+)/u);
+      if (m) {
+        recipient = m[1]
+          .replace(/\s*0\d{9}.*$/u, '')  // ตัดเบอร์โทรออก
+          .trim();
+        break;
+      }
+    }
+
+    parcels.push({ tracking, recipient });
+  }
+
+  return parcels;
 }
 
 // ──────────────────────────────────────────────
@@ -73,8 +96,15 @@ async function parsePDFWithClaude(buffer) {
           },
           {
             type: 'text',
-            text: `นี่คือบิลค่าส่งพัสดุ ดึงเฉพาะเลขพัสดุทุกเลข (เลขที่ขึ้นต้นด้วย TH หรือรูปแบบ EMS)
-ตอบเป็น JSON array เท่านั้น เช่น ["TH01288WV4KA5B0","TH47158WUBVH8A"]
+            text: `นี่คือบิลค่าส่งพัสดุ ดึงข้อมูลพัสดุทุกชิ้น
+
+หัวบิล (ชื่อเจ้าของสาขา + เบอร์ติดต่อ) — ไม่ต้องการ
+รายการพัสดุแต่ละชิ้น:
+  - เลขพัสดุ (เช่น TH47158WUBVH8A)
+  - ชื่อผู้รับ (บรรทัดที่ขึ้นต้นด้วย "ผู้รับ" — ตัด "ผู้รับ" และเบอร์โทรออก)
+
+ตอบเป็น JSON array เท่านั้น:
+[{"tracking":"TH47158WUBVH8A","recipient":"คุณเทวินทร์ วิธี"}]
 ถ้าไม่พบตอบ []`,
           },
         ],
@@ -93,7 +123,9 @@ async function parsePDFWithClaude(buffer) {
 
   try {
     const arr = JSON.parse(content.match(/\[[\s\S]*\]/)?.[0] || '[]');
-    return arr.filter(t => typeof t === 'string' && t.length > 5);
+    return arr
+      .filter(p => p && typeof p.tracking === 'string' && p.tracking.length > 5)
+      .map(p => ({ tracking: p.tracking, recipient: p.recipient || '' }));
   } catch (e) {
     console.error('JSON parse error:', e.message);
     return [];
@@ -101,16 +133,19 @@ async function parsePDFWithClaude(buffer) {
 }
 
 // ──────────────────────────────────────────────
-//  📝 Format: แยกเป็น bubble ละ 1 เลขพัสดุ
+//  📝 Format: แยกเป็น bubble ละ 1 พัสดุ
 // ──────────────────────────────────────────────
-function formatTrackings(trackings) {
-  if (trackings.length === 0) {
+function formatTrackings(parcels) {
+  if (parcels.length === 0) {
     return ['❌ ไม่พบเลขพัสดุในไฟล์นี้ค่ะ\nกรุณาตรวจสอบว่าส่งไฟล์ PDF บิลค่าส่งถูกต้องหรือไม่'];
   }
 
-  return trackings.map((t, i) =>
-    `📮 พัสดุที่ ${i + 1}/${trackings.length}\n${t}`
-  );
+  return parcels.map((p, i) => {
+    const lines = [`📮 พัสดุที่ ${i + 1}/${parcels.length}`];
+    if (p.recipient) lines.push(`👤 ${p.recipient}`);
+    lines.push(p.tracking);
+    return lines.join('\n');
+  });
 }
 
 module.exports = { parseBillPDF, formatTrackings };
