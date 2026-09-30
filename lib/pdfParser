@@ -1,13 +1,16 @@
 // ============================================================
 //  lib/pdfParser.js — ดึงเลขพัสดุ + ชื่อผู้รับ จาก PDF บิลค่าส่ง
-//  - PDF มี text layer → regex (ประหยัด quota)
-//  - PDF เป็น image → Claude Vision API (fallback)
+//
+//  กลยุทธ์:
+//  • Text PDF → regex หา tracking (แม่น 100%)
+//              → Claude text API หาชื่อ (ถูกกว่า Vision ~10x)
+//  • Image PDF → Claude Vision หาทั้งคู่ (fallback)
 // ============================================================
 
 const pdfParse = require('pdf-parse');
 
 // ──────────────────────────────────────────────
-//  🔍 Main: รับ Buffer → คืน array ของ { tracking, recipient }
+//  🔍 Main
 // ──────────────────────────────────────────────
 async function parseBillPDF(buffer) {
   const data = await pdfParse(buffer);
@@ -15,10 +18,12 @@ async function parseBillPDF(buffer) {
   console.log('PDF text length:', text.length);
 
   if (text.length > 20) {
-    const parcels = extractParcels(text);
-    if (parcels.length > 0) {
-      console.log('Regex found:', parcels);
-      return parcels;
+    const trackings = extractTrackingNumbers(text);
+    if (trackings.length > 0) {
+      console.log('Regex tracking:', trackings);
+      // ส่ง text ให้ Claude text API อ่านชื่อ (ถูกกว่า Vision มาก)
+      const recipients = await extractRecipientsFromText(text, trackings);
+      return trackings.map((t, i) => ({ tracking: t, recipient: recipients[i] || '' }));
     }
   }
 
@@ -28,52 +33,76 @@ async function parseBillPDF(buffer) {
 }
 
 // ──────────────────────────────────────────────
-//  📦 Regex: ดึงเลขพัสดุ + ชื่อผู้รับ จาก text
+//  📦 Regex: tracking numbers เท่านั้น (แม่น 100%)
 // ──────────────────────────────────────────────
-function extractParcels(text) {
-  const lines  = text.split('\n').map(l => l.trim()).filter(Boolean);
-  const flashRx = /(TH[A-Z0-9]{10,}?)(?=[1-9]\d*\.\d{2}|\s|$)/;
-  const emsRx   = /([A-Z]{2}\d{8,}TH)/;
-  const anyRx   = (line) => line.match(flashRx) || line.match(emsRx);
-
-  const parcels = [];
-  const seen    = new Set();
-
-  for (let i = 0; i < lines.length; i++) {
-    const tm = anyRx(lines[i]);
-    if (!tm) continue;
-
-    const tracking = tm[1];
-    if (seen.has(tracking)) continue;
-    seen.add(tracking);
-
-    // หาชื่อผู้รับ (ดูข้างหน้า 8 บรรทัด)
-    let recipient = '';
-    for (let j = i + 1; j < Math.min(lines.length, i + 9); j++) {
-      if (anyRx(lines[j])) break;
-
-      // "ผู้รับ [ชื่อ]" หรือ "ผู้รับ [ชื่อ] [เบอร์]"
-      const m = lines[j].match(/^ผู้รับ\s+(.+)/u);
-      if (m) {
-        recipient = m[1]
-          .replace(/\s*0\d{9}.*$/u, '')  // ตัดเบอร์โทรออก
-          .trim();
-        break;
-      }
-    }
-
-    parcels.push({ tracking, recipient });
-  }
-
-  return parcels;
+function extractTrackingNumbers(text) {
+  const results = new Set();
+  const flashRx = /(TH[A-Z0-9]{10,}?)(?=[1-9]\d*\.\d{2}|\s|$)/g;
+  const emsRx   = /([A-Z]{2}\d{8,}TH)/g;
+  let m;
+  while ((m = flashRx.exec(text)) !== null) results.add(m[1]);
+  while ((m = emsRx.exec(text)) !== null)   results.add(m[1]);
+  return [...results];
 }
 
 // ──────────────────────────────────────────────
-//  🤖 Claude Vision fallback สำหรับ image PDF
+//  🤖 Claude text API: อ่านชื่อภาษาไทยจาก text
+//  (ถูกกว่า Vision ~10x เพราะไม่ต้องส่งรูป)
+// ──────────────────────────────────────────────
+async function extractRecipientsFromText(text, trackings) {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) return trackings.map(() => '');
+
+  const res = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'Content-Type':      'application/json',
+      'x-api-key':         apiKey,
+      'anthropic-version': '2023-06-01',
+    },
+    body: JSON.stringify({
+      model:      'claude-haiku-4-5-20251001',
+      max_tokens: 256,
+      messages: [{
+        role: 'user',
+        content: `ข้อความนี้มาจากบิลค่าส่งพัสดุ อ่านหาชื่อผู้รับของแต่ละเลขพัสดุ
+
+ข้อความจากบิล:
+${text}
+
+เลขพัสดุที่ต้องการหาชื่อผู้รับ (ตามลำดับ):
+${trackings.map((t, i) => `${i + 1}. ${t}`).join('\n')}
+
+กฎ:
+- ชื่อผู้รับอยู่ใกล้บรรทัด "ผู้รับ" หลังเลขพัสดุแต่ละชิ้น
+- ตัดคำว่า "ผู้รับ" และเบอร์โทรออก เหลือแค่ชื่อ
+- ถ้าหาไม่พบให้ใส่ ""
+
+ตอบเป็น JSON array ของชื่อตามลำดับเท่านั้น เช่น ["ห้างหุ้นส่วนจำกัด ที ทู", "คุณเทวินทร์ วิธี"]`,
+      }],
+    }),
+  });
+
+  if (!res.ok) { console.error('Claude text API error:', res.status); return trackings.map(() => ''); }
+
+  const json    = await res.json();
+  const content = json?.content?.[0]?.text || '[]';
+  console.log('Recipients response:', content);
+
+  try {
+    const arr = JSON.parse(content.match(/\[[\s\S]*\]/)?.[0] || '[]');
+    return arr.map(r => (typeof r === 'string' ? r.trim() : ''));
+  } catch (e) {
+    return trackings.map(() => '');
+  }
+}
+
+// ──────────────────────────────────────────────
+//  🤖 Claude Vision: image PDF (fallback)
 // ──────────────────────────────────────────────
 async function parsePDFWithClaude(buffer) {
   const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) throw new Error('ไม่มี ANTHROPIC_API_KEY — กรุณาเพิ่มใน Vercel Environment Variables');
+  if (!apiKey) throw new Error('ไม่มี ANTHROPIC_API_KEY');
 
   const base64 = buffer.toString('base64');
 
@@ -90,20 +119,20 @@ async function parsePDFWithClaude(buffer) {
       messages: [{
         role: 'user',
         content: [
-          {
-            type:   'document',
-            source: { type: 'base64', media_type: 'application/pdf', data: base64 },
-          },
+          { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: base64 } },
           {
             type: 'text',
-            text: `นี่คือบิลค่าส่งพัสดุ ดึงข้อมูลพัสดุทุกชิ้น
+            text: `บิลค่าส่งพัสดุ ดึงข้อมูลแต่ละพัสดุ
 
-หัวบิล (ชื่อเจ้าของสาขา + เบอร์ติดต่อ) — ไม่ต้องการ
-รายการพัสดุแต่ละชิ้น:
-  - เลขพัสดุ (เช่น TH47158WUBVH8A)
-  - ชื่อผู้รับ (บรรทัดที่ขึ้นต้นด้วย "ผู้รับ" — ตัด "ผู้รับ" และเบอร์โทรออก)
+โครงสร้างบิล:
+- หัวบิล: ชื่อเจ้าของสาขา + เบอร์ติดต่อ (ไม่ต้องการ)
+- รายการพัสดุ: เลขพัสดุ (TH...) → ผู้รับ [ชื่อ] → ที่อยู่
 
-ตอบเป็น JSON array เท่านั้น:
+กฎ:
+- "tracking" = เลขพัสดุ เช่น TH47158WUBVH8A
+- "recipient" = ชื่อผู้รับ ตัด "ผู้รับ" และเบอร์โทรออก — ห้ามใช้ชื่อจากหัวบิล
+
+ตอบ JSON array เท่านั้น:
 [{"tracking":"TH47158WUBVH8A","recipient":"คุณเทวินทร์ วิธี"}]
 ถ้าไม่พบตอบ []`,
           },
@@ -112,28 +141,24 @@ async function parsePDFWithClaude(buffer) {
     }),
   });
 
-  if (!res.ok) {
-    const err = await res.text();
-    throw new Error('Claude API error: ' + err.slice(0, 200));
-  }
+  if (!res.ok) throw new Error('Claude API error: ' + (await res.text()).slice(0, 200));
 
   const json    = await res.json();
   const content = json?.content?.[0]?.text || '[]';
-  console.log('Claude response:', content);
+  console.log('Vision response:', content);
 
   try {
     const arr = JSON.parse(content.match(/\[[\s\S]*\]/)?.[0] || '[]');
     return arr
-      .filter(p => p && typeof p.tracking === 'string' && p.tracking.length > 5)
+      .filter(p => p?.tracking?.length > 5)
       .map(p => ({ tracking: p.tracking, recipient: p.recipient || '' }));
   } catch (e) {
-    console.error('JSON parse error:', e.message);
     return [];
   }
 }
 
 // ──────────────────────────────────────────────
-//  📝 Format: แยกเป็น bubble ละ 1 พัสดุ
+//  📝 Format: bubble ละ 1 พัสดุ
 // ──────────────────────────────────────────────
 function formatTrackings(parcels) {
   if (parcels.length === 0) {
