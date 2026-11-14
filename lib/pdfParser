@@ -151,9 +151,8 @@ async function parseWithVision(buffer) {
     body: JSON.stringify({
       model:       VISION_MODEL,
       max_tokens:  1024,
-      temperature: 0,
       tools:       [tool],
-      tool_choice: { type: 'tool', name: 'report_bill' },
+      tool_choice: { type: 'auto' }, // รุ่นใหม่ไม่รองรับการบังคับ tool → ใช้ auto + สั่งใน prompt
       messages: [{
         role: 'user',
         content: [
@@ -167,7 +166,8 @@ async function parseWithVision(buffer) {
 - แต่ละรายการ: "ผู้ส่ง ..." → "ขนส่ง: ..." → เลขพัสดุ + ราคา → ค่าขนส่ง/Speed/ค่าน้ำมัน/น้ำหนัก → "ผู้รับ [ชื่อ] [เบอร์]" → ที่อยู่
 - รายการ "ส่งใบเสร็จทาง SMS" ไม่ใช่พัสดุ ไม่ต้องใส่
 
-คัดลอกข้อความตามที่เห็นจริงทีละตัวอักษร ระวังวรรณยุกต์และสระภาษาไทย แล้วเรียก report_bill`,
+คัดลอกข้อความตามที่เห็นจริงทีละตัวอักษร ระวังวรรณยุกต์และสระภาษาไทย
+จากนั้นต้องเรียก tool report_bill ทันที ห้ามตอบเป็นข้อความธรรมดา`,
           },
         ],
       }],
@@ -177,7 +177,14 @@ async function parseWithVision(buffer) {
   if (!res.ok) throw new Error('Claude API ' + res.status + ': ' + (await res.text()).slice(0, 200));
 
   const json  = await res.json();
-  const input = json?.content?.find(c => c.type === 'tool_use')?.input || {};
+  let input = json?.content?.find(c => c.type === 'tool_use')?.input;
+
+  // สำรอง: ถ้าโมเดลตอบเป็นข้อความแทนการเรียก tool → หา JSON ในข้อความ
+  if (!input) {
+    const txt = (json?.content || []).filter(c => c.type === 'text').map(c => c.text).join('\n');
+    console.log('No tool_use, text:', txt.slice(0, 300));
+    try { input = JSON.parse(txt.match(/\{[\s\S]*\}/)?.[0] || '{}'); } catch { input = {}; }
+  }
   const branch = cleanName(input.branch_name || '');
 
   return (input.parcels || [])
